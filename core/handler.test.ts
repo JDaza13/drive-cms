@@ -6,6 +6,11 @@ import { handleApi } from "./handler.js";
 import type { FeedResponse } from "./types.js";
 
 const FOLDER = "folder_1234567890";
+const MODIFIED = "2026-11-01T00:00:00.000Z";
+// 1x1 PNG and GIF, as Google's Markdown export embeds pictures.
+const PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+const GIF = "R0lGODlhAQABAAAAACw=";
 let serviceAccountJson = "";
 
 beforeAll(async () => {
@@ -31,7 +36,9 @@ const get = (path: string, env: Record<string, string>) =>
   handleApi(new Request(`https://site.test${path}`), env);
 
 /** Fake Google: token endpoint plus the Drive calls the handler makes. */
-function stubGoogle(files: Record<string, { name: string; mimeType: string; parents: string[] }>) {
+type FakeFile = { name: string; mimeType: string; parents: string[]; markdown?: string };
+
+function stubGoogle(files: Record<string, FakeFile>) {
   const calls: string[] = [];
   vi.stubGlobal(
     "fetch",
@@ -56,16 +63,16 @@ function stubGoogle(files: Record<string, { name: string; mimeType: string; pare
           name: f.name,
           mimeType: f.mimeType,
           createdTime: "2026-11-01T00:00:00.000Z",
-          modifiedTime: "2026-11-01T00:00:00.000Z",
+          modifiedTime: MODIFIED,
         }));
         return Response.json({ files: list });
       }
       const [, id, action] = path.split("/");
       const file = files[decodeURIComponent(id)];
       if (!file) return new Response("not found", { status: 404 });
-      if (action === "export") return new Response(`# ${file.name}\n\nBody`);
+      if (action === "export") return new Response(file.markdown ?? `# ${file.name}\n\nBody`);
       if (url.searchParams.get("alt") === "media") return new Response("IMAGE_BYTES");
-      return Response.json({ id, ...file });
+      return Response.json({ id, name: file.name, mimeType: file.mimeType, parents: file.parents });
     }),
   );
   return calls;
@@ -152,6 +159,60 @@ describe("drive source", () => {
     expect(response.status).toBe(502);
     expect(await response.text()).not.toContain("quota");
     spy.mockRestore();
+  });
+});
+
+describe("pictures inside Docs", () => {
+  const files: Record<string, FakeFile> = {
+    doc_1234567890: {
+      name: "With photos",
+      mimeType: "application/vnd.google-apps.document",
+      parents: [FOLDER],
+      markdown: `Intro\n\n![][image1]\n\nMiddle ![](data:image/gif;base64,${GIF})\n\n[image1]: <data:image/png;base64,${PNG}>`,
+    },
+    out_doc_123456: {
+      name: "Elsewhere",
+      mimeType: "application/vnd.google-apps.document",
+      parents: ["another_folder"],
+      markdown: `![](data:image/png;base64,${PNG})`,
+    },
+    img_1234567890: { name: "Photo.jpg", mimeType: "image/jpeg", parents: [FOLDER] },
+  };
+
+  it("replaces embedded pictures with links in the feed", async () => {
+    stubGoogle({ doc_1234567890: files.doc_1234567890 });
+    const body = (await (await get("/api/feed", driveEnv())).json()) as FeedResponse;
+    const v = Date.parse(MODIFIED).toString(36);
+    expect(body.items[0].markdown).toBe(
+      `Intro\n\n![][image1]\n\nMiddle ![](/api/doc-image?doc=doc_1234567890&n=0&v=${v})` +
+        `\n\n[image1]: </api/doc-image?doc=doc_1234567890&n=1&v=${v}>`,
+    );
+  });
+
+  it("serves each picture by its position", async () => {
+    stubGoogle(files);
+    const gif = await get("/api/doc-image?doc=doc_1234567890&n=0&v=x", driveEnv());
+    expect(gif.status).toBe(200);
+    expect(gif.headers.get("content-type")).toBe("image/gif");
+    expect(gif.headers.get("cache-control")).toContain("s-maxage=86400");
+    expect(new Uint8Array(await gif.arrayBuffer())).toEqual(
+      Uint8Array.from(atob(GIF), (c) => c.charCodeAt(0)),
+    );
+    const png = await get("/api/doc-image?doc=doc_1234567890&n=1", driveEnv());
+    expect(png.headers.get("content-type")).toBe("image/png");
+    expect((await png.arrayBuffer()).byteLength).toBe(atob(PNG).length);
+  });
+
+  it.each([
+    ["a position past the last picture", "doc=doc_1234567890&n=2", 404],
+    ["a Doc outside the folder", "doc=out_doc_123456&n=0", 404],
+    ["a file that isn't a Doc", "doc=img_1234567890&n=0", 404],
+    ["a negative position", "doc=doc_1234567890&n=-1", 400],
+    ["no position", "doc=doc_1234567890", 400],
+    ["a malformed id", "doc=..%2Fx&n=0", 400],
+  ])("refuses %s", async (_label, query, status) => {
+    stubGoogle(files);
+    expect((await get(`/api/doc-image?${query}`, driveEnv())).status).toBe(status);
   });
 });
 

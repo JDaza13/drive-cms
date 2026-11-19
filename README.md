@@ -33,6 +33,11 @@ Browser ──GET /api/feed──▶ CDN cache (5 min) ──▶ core/handler.ts
   page; raw HTML in a Doc is shown as text, never executed.
 - `GET /api/file?id=…` streams one image from the folder, so the folder can stay
   **private**. It refuses files outside the folder and non-images.
+- `GET /api/doc-image?doc=…&n=…` returns the n-th picture pasted inside a Doc.
+  Google's export embeds those pictures in the Markdown; the feed swaps each
+  one for this link so the feed stays a few KB however many photos a Doc has.
+  A `v=` parameter changes when the Doc is edited, so cached pictures never go
+  stale.
 - Responses carry `s-maxage` + `stale-while-revalidate`, so most visits are
   served from the CDN and Drive is called at most every few minutes.
 - Each item uses the file name as its title and the Drive **Description** field
@@ -108,7 +113,9 @@ To try it locally: put the variables in `.dev.vars`, then
 
 - Only files directly in the folder are read (no subfolders), newest first by
   creation date.
-- Images pasted inside a Doc are embedded in the Markdown as data URLs, which
-  makes the feed heavier. For photos, upload them to the folder as files.
+- Google shrinks pictures pasted inside a Doc to about 570 px wide and converts
+  them to PNG. For full-quality photos, upload them to the folder as image
+  files; each becomes its own card. The first request for a Doc picture takes
+  about a second (it re-exports the Doc); after that the CDN serves it.
 - Posts aren't translated: they appear in whatever language they were written.
   The page around them follows the visitor's language.

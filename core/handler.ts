@@ -7,9 +7,21 @@
 // Routes
 //   GET /api/feed          newest Docs and images in the folder, as JSON
 //   GET /api/file?id=<id>  one image from the folder (private folders work)
+//   GET /api/doc-image?doc=<id>&n=<index>
+//                          one picture embedded in a Doc (see doc-images.ts)
 
 import { demoItems } from "./demo-feed.js";
-import { DriveError, downloadFile, getFile, isImageType, listFolder, toFeedItems } from "./drive.js";
+import { decodeBase64, findInlineImages } from "./doc-images.js";
+import {
+  DriveError,
+  downloadFile,
+  exportMarkdown,
+  getFile,
+  isDoc,
+  isImageType,
+  listFolder,
+  toFeedItems,
+} from "./drive.js";
 import { ConfigError, readConfig, type Env, type FeedConfig } from "./env.js";
 import { getAccessToken } from "./google-auth.js";
 import type { ApiError, FeedResponse } from "./types.js";
@@ -41,26 +53,59 @@ async function feed(config: FeedConfig): Promise<Response> {
   return json(body, 200, cacheHeader(config.cacheSeconds));
 }
 
+const isFileId = (id: string | null): id is string => Boolean(id && /^[\w-]{10,}$/.test(id));
+
+/** Image responses: URLs change when content does, so the CDN can keep them longer. */
+const imageHeaders = (config: FeedConfig, mimeType: string) => ({
+  "content-type": mimeType,
+  "cache-control": cacheHeader(Math.max(config.cacheSeconds, 86_400)),
+  "x-content-type-options": "nosniff",
+});
+
+type DriveConfig = Extract<FeedConfig, { source: "drive" }>;
+
+/**
+ * Metadata for `id`, or null unless it sits directly in the feed folder and
+ * passes `accept`. Keeps the API from serving anything else the service
+ * account might be able to read.
+ */
+async function folderFile(
+  config: DriveConfig,
+  token: string,
+  id: string,
+  accept: (mimeType: string) => boolean,
+) {
+  const meta = await getFile(token, id);
+  const inFolder = meta.parents?.includes(config.folderId) ?? false;
+  return inFolder && accept(meta.mimeType) ? meta : null;
+}
+
 async function file(config: FeedConfig, id: string | null): Promise<Response> {
-  if (!id || !/^[\w-]{10,}$/.test(id)) return fail(400, "Missing or invalid id");
+  if (!isFileId(id)) return fail(400, "Missing or invalid id");
   if (config.source === "demo") return fail(404, "Not found");
 
   const token = await getAccessToken(config.serviceAccount);
-  const meta = await getFile(token, id);
-  // Only serve files that are part of the feed, even if the service account
-  // can read other things.
-  const inFolder = meta.parents?.includes(config.folderId) ?? false;
-  if (!inFolder || !isImageType(meta.mimeType)) {
-    return fail(404, "Not found");
-  }
+  const meta = await folderFile(config, token, id, isImageType);
+  if (!meta) return fail(404, "Not found");
   const media = await downloadFile(token, id);
-  return new Response(media.body, {
-    headers: {
-      "content-type": meta.mimeType,
-      // Image ids don't change when the feed does, so cache longer.
-      "cache-control": cacheHeader(Math.max(config.cacheSeconds, 86_400)),
-      "x-content-type-options": "nosniff",
-    },
+  return new Response(media.body, { headers: imageHeaders(config, meta.mimeType) });
+}
+
+async function docImage(config: FeedConfig, params: URLSearchParams): Promise<Response> {
+  const docId = params.get("doc");
+  const position = params.get("n") ?? "";
+  if (!isFileId(docId) || !/^\d{1,3}$/.test(position)) {
+    return fail(400, "Missing or invalid doc or n");
+  }
+  const n = Number(position);
+  if (config.source === "demo") return fail(404, "Not found");
+
+  const token = await getAccessToken(config.serviceAccount);
+  if (!(await folderFile(config, token, docId, isDoc))) return fail(404, "Not found");
+  const image = findInlineImages(await exportMarkdown(token, docId))[n];
+  if (!image) return fail(404, "Not found");
+  return new Response(decodeBase64(image.base64), {
+    headers: imageHeaders(config, image.mimeType),
   });
 }
 
@@ -76,6 +121,8 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         return await feed(config);
       case "/api/file":
         return await file(config, url.searchParams.get("id"));
+      case "/api/doc-image":
+        return await docImage(config, url.searchParams);
       default:
         return fail(404, "Not found");
     }

@@ -1,6 +1,7 @@
 // Drive API v3 calls the feed needs: list a folder, export a Doc as Markdown
 // and stream an image. Plain fetch, so it runs on any host.
 
+import { linkInlineImages, versionOf } from "./doc-images.js";
 import type { FeedItem } from "./types.js";
 
 const API = "https://www.googleapis.com/drive/v3";
@@ -36,6 +37,7 @@ async function driveFetch(token: string, path: string, params: Record<string, st
 }
 
 export const isImageType = (mimeType: string) => IMAGE_TYPES.includes(mimeType);
+export const isDoc = (mimeType: string) => mimeType === GOOGLE_DOC;
 
 /** Newest Docs and images directly inside the folder (no subfolders). */
 export async function listFolder(token: string, folderId: string, limit: number) {
@@ -92,7 +94,11 @@ export async function toFeedItems(token: string, files: DriveFile[]): Promise<Fe
           ...base,
           kind: "post",
           title: file.name,
-          markdown: await exportMarkdown(token, file.id),
+          markdown: linkInlineImages(
+            await exportMarkdown(token, file.id),
+            file.id,
+            versionOf(file.modifiedTime),
+          ),
         };
       }
       return {
