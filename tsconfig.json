@@ -1,0 +1,17 @@
+{
+  // Solution file for `tsc -b`. The compilerOptions here are only for Vercel,
+  // which compiles api/ with the root tsconfig and ignores project references.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" },
+    { "path": "./tsconfig.server.json" }
+  ]
+}

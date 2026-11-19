@@ -1,0 +1,7 @@
+# Cloudflare Pages settings, used by `wrangler pages dev` and `wrangler pages deploy`.
+# functions/api/[[path]].ts serves /api/*; dist/ is the static site.
+# Secrets (GOOGLE_SERVICE_ACCOUNT_JSON, DRIVE_FOLDER_ID) go in the Pages
+# dashboard or in .dev.vars locally, never here.
+name = "drive-cms"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-11-01"
